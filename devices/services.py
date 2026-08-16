@@ -29,12 +29,27 @@ class PayloadIngestor:
         return PayloadStatus.PASSING if value == 1 else PayloadStatus.FAILING
 
     def ingest(self) -> Payload:
+        """Decode, classify, and store one payload, raising DuplicatePayload on a repeat fCnt.
+
+        ingest() always runs inside an outer transaction (a TestCase's
+        implicit one in tests; potentially a real one in production), and on
+        Postgres a failed query poisons the whole transaction, not just
+        itself — every later query on that connection would raise
+        TransactionManagementError until rollback, even ones unrelated to
+        this insert. Wrapping the insert in its own transaction.atomic()
+        makes Django take a savepoint instead: when the (device, fCnt)
+        UniqueConstraint raises IntegrityError, only that savepoint rolls
+        back, so the outer transaction stays healthy and usable for
+        whatever runs after this method returns or raises.
+        """
+
         data_hex = self.decode_data_to_hex(self.data)
         status = self.determine_status(data_hex)
 
         device, _ = Device.objects.get_or_create(devEUI=self.devEUI)
 
         try:
+            # Savepoint so a failed insert doesn't poison the outer transaction (see docstring).
             with transaction.atomic():
                 payload = Payload.objects.create(
                     device=device,
